@@ -1,0 +1,577 @@
+---
+title: "CS815 Assignment 2 - Automatically Formulating Trading Rules"
+author: "Group 11 Linu Roby/ Deepali Yadav"
+date: "2024-03-30"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require("quantmod", character.only = TRUE)) {
+  install.packages("quantmod")
+}
+library(quantmod)
+if (!require("neuralnet", character.only = TRUE)) {
+  install.packages("neuralnet")
+}
+library(neuralnet)
+if (!require("Metrics", character.only = TRUE)) {
+  install.packages("Metrics")
+}
+library(Metrics)
+if (!require("dplyr", character.only = TRUE)) {
+  install.packages("dplyr")
+}
+library(dplyr)
+if (!require("ggplot2", character.only = TRUE)) {
+  install.packages("ggplot2")
+}
+library(ggplot2)
+if (!require("gridExtra", character.only = TRUE)) {
+  install.packages("gridExtra")
+}
+library(gridExtra)
+options(scipen = 10, digits=4)
+```
+
+# Background to the problem
+  Algorithmic Trading is the use of programs to assist in any aspect of trading financial assets and encompasses systems which may decide on timing, price or quantity of order. Algorithmic trading has been proved very efficient where the stocks can be traded in milliseconds but at the same time making sure the market movements are utilized at the right time. With algorithmic trading, trade orders can be executed without human intervention and trading outcomes can be optimized by avoiding human errors. In the year of 2019, 70% of traded shares on US stock exchanges were placed automatically (Folger,J.2020)
+    Trade execution implements trades while ensuring low transaction costs(Artificial Intelligence in Asset Management - Söhnke M. Bartram,Jürgen Branke,Mehrshad Motahari,2020). The strategies used in algorithmic trading are based on technical analysis. Here past stock and market data are used to predict returns from future assets.
+  In this coursework, we are using neural network for prediction of next day high and low prices of a stock. The neural network model is trained and used for predictions. A trading strategy is then formulated based on these predictions whether the stock would be bought, sold or put on hold for a day.  
+  The article by Neven Pičuljan briefs about similar work done in hedge funds and finance using deep learning. While model selection, if the neural network is too complex, ie, if it has too many layers or too many neurons in each layer, the model can overfit the data. If the neural network is too simple, then it can underfit the data. In this article, a recurrent neural network is used for finance related task. The final component of the neural network is the linear layer and the final output of the network is the predicted Close price in the time period. During training, the predicted and actual Close prices are compared and the difference is reduced using back propogation algorithm and gradient descent optimization algorithm (Adam is used in this blog). After back testing, the training strategy is evaluated using Sharpe ratio. In reference to the article, the Sharpe ratio shows the ratio between the returns and the additional risk. Larger the Sharpe ratio, the better.
+  In most equilibrium models, expected excess returns are positively related to risk as measured by the expected volatility of the market (Merton, 1980). When volatility is lower (higher) than expected, expected returns decrease (increase), and the corresponding upward (downward) revision of prices is picked up by the trading rules(Journal of Financial Economics,Franklin Allen & Risto Karjalainen,1999).
+  In this project, we are prediting the high and low prices for next day using the values from previous days. We are using neural network which will be trained to get predictions of training and testing data. The training and testing error are compared and visualised. These predictions will be then used to build a trading rule and to make decision whether and when the stock will be bought or sold.
+
+# Overview of Data
+As we are applying trade rules, the data we select should ideally be a time series data. The data is taken from Yahoo Finance which will include relevant attributes and required technical indicators for the analysis. Data for a period of 3 years(2016-2018) is taken for training. For back testing, 25% of this data will be retained. The stock chosen is AMD(Advanced Micro Devices, Inc.) which has high trading volume making it suitable for trading strategies. AMD is a semiconductor company which develops computer processors. The price movements are stable since 2015 after hitting a low price. The box plot shows that there are some outliers. They indicate some large price movements which can be used in the trading strategy. However the stock is not highly volatile. The box is symmetric indicating the daily returns are randomly distributed.
+  
+
+```{r echo=FALSE, results='hide'}
+asset <- c("AMD")
+stock <-getSymbols(asset,
+                   src="yahoo",
+                   from="2016-01-01",
+                   to="2019-01-01",
+                   env=NULL)
+head(stock,2)
+# Get daily returns
+myreturns <- dailyReturn(stock)
+head(myreturns,2)
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=12}
+# Box plot to check for outliers
+boxplot(myreturns, main = "Box plot")
+```
+```{r echo=FALSE}
+# Histograms showing the distribution of returns
+hist(myreturns, main = "Distribution - Daily Returns", xlab = "Returns", col = "red", breaks = 30)
+
+```
+
+```{r echo=FALSE, results='hide'}
+# Retreive the relevant attributes of stock
+opening_price <- coredata(stock[,1])
+high_price <- coredata(stock[,2])
+low_price <- coredata(stock[,3])
+closing_price <- coredata(stock[,4])
+volume <- coredata(stock[,5])
+adjusted <- coredata(stock[,6])
+EMA10 <- EMA(adjusted, 10)
+EMA30 <- EMA(adjusted, 30)
+SMA_low10 <- SMA(low_price, 10)     
+SMA_high10 <- SMA(high_price, 10)   
+RSI14 <- RSI(adjusted, 14)
+```
+### Data summary
+```{r echo=FALSE, fig.height=7, fig.width=14}
+AMD<- ts(cbind(opening_price, closing_price, low_price, high_price, volume, RSI14, EMA10, EMA30))
+  colnames(AMD) <- c("Opening Price", "Closing Price", "Low Price", "High Price", "Volume", "RSI14", "EMA10", "EMA30")
+plot(AMD)
+```
+
+## Price prediction
+To implement the trading strategy, the relevant attributes Opening/Closing prices, High/Low prices, Volume and Adjusted prices are extracted. The technical indicators used are EMA, SMA and RSI. The high and low prices are predicted from the lagged version of these inputs. The model is built to predict the price of future day.
+
+## Techincal Indicators
+Based on the historical price and volume, the technical indicators identify trends and patterns for potential buy/sell. These can be leading or lagging technical indicators. Leading indicators predict future outcomes by looking ahead. This may be misleading and may not be always accurate.Lagging indicators are known after the occurrence of the event and can be useful to confirm the pattern that is occurring over time.  In this work, the technical indicators used are SMA, EMA and RSI.
+
+### Simple Moving Avergae(SMA)
+The aim of all moving averages is to find the direction in which the stock price is moving based on its past prices. SMA combines the price points over a period of time and divides by the total number of data points to give the average presented over a single trend line. If the stock is above the moving average, it denotes an upward trend. This indicates that its a BUY signal, when the stock crosses above the trend. When the stock crosses below the trend, its a SELL signal.
+
+### Exponential Moving Average(EMA)
+Very similar to SMA but data is more responsive to new information as this places a greater weight on more recent data points.Exponential Moving Averages(EMA) identifies the trend direction to analyse if the price of the stock is showing an uptrend(price is above EMA) or downtrend(price is below EMA). This is one of the technical indicators used here to identify potential buy/sell opportunities. EMA allows traders to react quickly to changing market conditions (coinwofficial.medium.com). It is a usual practice to use EMA in conjunction with other technical indicators which in turn will help to confirm signals and also reduce false alarms.
+
+### Relative strength index (RSI)
+RSI is a technical indicator which measures speed and change of price movements and give warning signals for dangerous price movements. The value oscillates between 0 and 100. If the value is above 70, the asset is traditionally considered as overbought. If the value is below 30, the asset is considered as oversold. 
+
+The relevant attributes are retrieved from the source. The SMA of low and high price are calculated over a period of 10 days. The EMA of adjusted prices over a period of 10 days and 30 days are calculated. RSI is calculated based on the adjusted price for over a typical period of 14 days.
+
+## Neural network model
+The sequence of observations  is transformed into an appropriate form using Lag. This gives a lagged version of the time series data set by shifting the time back by the specified number of observations. The model will be input with 1,2 and 3 days of lagged prices along with SMA,EMA and RSI which were lagged by 1 day. The out put of the model will have the high price and low price.
+
+```{r echo=FALSE, results='hide'}
+# High price and Low price are the target variables which will be y1 and y2. The other inputs are features.
+trading_data <- data.frame(y1=high_price,
+                         y2=low_price,
+                         x1=Lag(as.numeric(opening_price), 1),
+                         x2=Lag(as.numeric(opening_price), 2),
+                         x3=Lag(as.numeric(opening_price), 3),
+                         x4=Lag(as.numeric(high_price), 1),
+                         x5=Lag(as.numeric(high_price), 2),
+                         x6=Lag(as.numeric(high_price), 3),
+                         x7=Lag(as.numeric(low_price), 1),
+                         x8=Lag(as.numeric(low_price), 2),
+                         x9=Lag(as.numeric(low_price), 3), 
+                         x10=Lag(as.numeric(adjusted), 1),
+                         x11=Lag(as.numeric(adjusted), 2),
+                         x12=Lag(as.numeric(adjusted), 3),
+                         x13=Lag(as.numeric(EMA10), 1),
+                         x14=Lag(as.numeric(EMA30), 1),
+                         x15=Lag(as.numeric(SMA_low10), 1),
+                         x16=Lag(as.numeric(SMA_high10), 1),
+                         x17=Lag(as.numeric(RSI14), 1),
+                         x18=opening_price);
+# View the data frame
+trading_data  
+# Set the column names in the dataframe. Feature variables are numbered starting from 1, skipping the first 2 columns.
+colnames(trading_data) <- c('high_price', 'low_price', sprintf('feature%s', seq(1, (ncol(trading_data) - 2))))
+
+# Convert to time series data for forecasting and predictions
+trading_data <- ts(trading_data)
+
+# Remove the rows containing NA or missing values.
+trading_data <- na.omit(trading_data)
+head(trading_data,3)
+```
+
+The inputs are scaled to normalize the data. The scaled parameters are saved for later to retrieve the real values. The trading data is split into training and testing data. 75% of data is allocated for training.
+
+```{r echo=FALSE, results='hide'}
+scaled_data <- scale(trading_data, scale = TRUE, center = TRUE)
+scale_parameters <- attributes(scaled_data)
+
+# Train - Test split
+split = 0.75
+index <- round((split)*nrow(scaled_data))
+
+train_data <- scaled_data[1:index,]
+# Print the training data
+head(train_data,5)
+nrow(train_data)
+test_data <- scaled_data[(index+1):nrow(scaled_data),]
+# Print the testing data
+head(test_data,3)
+dim(test_data)
+```
+
+A neural network model is created with 2 hidden layers each having 15 neurons. All the other variables in training data is fed as inputs to formulate the target variables, high price and low price. The threshold is kept as 0.01. This means the weights are not updated if the partial derivative of error with respoect to weight is less than the threshold. This is to ensure that unnecessary weight updates are not happening for insignificant updates. This will prevent the model from slowing down. The stepmax values in kept hihg as 1e+06 to allow the model to run till this value if it fails to converge before that. The training performance of the neural network model stores the predictions on training data. This can be compared with the actual target to perform evaluation on training.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+nn_model <- neuralnet(as.formula(high_price + low_price ~ .), 
+                     train_data,
+                     hidden = c(15,15),
+                     stepmax=1e+06,
+                     threshold=0.01)
+```
+
+
+```{r echo=FALSE, dev='pdf'}
+plot(nn_model, rep = "best")
+```
+
+#### Training the model
+```{r echo=FALSE, results='hide'}
+train_perf <-nn_model$net.result[[1]]
+head(train_perf,3)
+```
+
+The scaled attributes which were stored earlier while scaling will be used to unscale the values to get the real values after training.
+```{r echo=FALSE,results='hide'}
+# Apply scaled attributes to retrieve the real values
+high_train_preds <- train_perf[,1] * scale_parameters$`scaled:scale`[1] +
+                    scale_parameters$`scaled:center`[1]
+# Print the predictions on high prices on training data
+head(high_train_preds,5)
+ 
+high_train_actuals <- train_data[,1] * scale_parameters$`scaled:scale`[1] +
+                    scale_parameters$`scaled:center`[1]
+
+low_train_preds <- train_perf[,2] * scale_parameters$`scaled:scale`[2] +
+                    scale_parameters$`scaled:center`[2]
+head(low_train_preds,5)
+
+low_train_actuals <- train_data[,2] * scale_parameters$`scaled:scale`[2] +
+                    scale_parameters$`scaled:center`[2]
+
+ema_train_actuals <- train_data[, 15] * scale_parameters$`scaled:scale`[15] +
+               scale_parameters$`scaled:center`[15]
+
+sma__train_actuals <- train_data[, 17] * scale_parameters$`scaled:scale`[17] +
+               scale_parameters$`scaled:center`[17]
+
+sma_hi_train_actuals <- train_data[, 18] * scale_parameters$`scaled:scale`[18] +
+  scale_parameters$`scaled:center`[18]
+
+train_day=seq(1:nrow(train_data))
+
+# Combine the results to a dataframe
+train_output <- data.frame(cbind(high_train_preds, high_train_actuals,
+                                  low_train_preds,low_train_actuals, 
+                                  ema_train_actuals, train_day, sma__train_actuals, sma_hi_train_actuals))
+
+```
+```{r echo=FALSE}
+highprice_errors = high_train_preds - high_train_actuals
+lowprice_errors = low_train_preds - low_train_actuals
+nice_output = cbind(train_output, highprice_errors,lowprice_errors)
+head(nice_output,3)
+```
+
+The training error obtained is around 0.4 which is indicating that the model is working well on the train dataset.
+
+```{r echo=FALSE, results='hide'}
+# Print the error value during Training
+cat('Training Error: ', nn_model$result.matrix[1,])
+```
+The actual values and predicted values from training data were compared.  The model is performing well for training data with low RMSE values on high price and low price.
+```{r echo=FALSE}
+cat('High predictions error: \n', rmse(train_output[,2], train_output[,1]))
+cat('\nLow predictions error: \n', rmse(train_output[,4], train_output[,3]))
+```
+ 
+### Training performance plot
+```{r echo=FALSE, fig.height=7, fig.width=14}
+pltLP <- ggplot() + geom_line(data=train_output, aes(x=train_output[,5], y=train_output[,4] , colour='Actual Price')) +
+  geom_line(data=train_output, aes(x=train_output[,5], y=train_output[,3], colour='Low Price Pred')) +
+  labs(x='Day', y='Share Price ($)') +
+  ggtitle('Low Price Prediction: Training') + 
+  theme(legend.position = c(0.775,0.2), legend.justification = c(0, 1),
+  axis.title.x = element_text(size = 15), # Adjust size of x-axis label
+  axis.title.y = element_text(size = 15), # Adjust size of y-axis label
+  axis.text.x = element_text(angle = 45, hjust = 1), # Rotate x-axis labels
+  plot.title = element_text(hjust = 0.5, size = 18), # Adjust size of plot title 
+  legend.title = element_text(hjust = 0.2, size = 10),
+  legend.text = element_text(size = 10)) +
+  scale_color_manual(name=NULL, values = c('blue','red')) +
+  theme(plot.title = element_text(hjust = 0.5))
+  
+pltHP <- ggplot() + geom_line(data=train_output, aes(x=train_output[,5], y=train_output[,2] , colour='Actual Price')) +
+  geom_line(data=train_output, aes(x=train_output[,5], y=train_output[,1], colour='High Price Pred')) +
+  labs(x='Day', y='Share Price ($)') +
+  ggtitle('High Price Prediction: Training') + 
+  theme(legend.position = c(0.775,0.2), legend.justification = c(0, 1),
+  axis.title.x = element_text(size = 15), # Adjust size of x-axis label
+  axis.title.y = element_text(size = 15), # Adjust size of y-axis label
+  axis.text.x = element_text(angle = 45, hjust = 1), # Rotate x-axis labels
+  plot.title = element_text(hjust = 0.5, size = 18), # Adjust size of plot title 
+  legend.title = element_text(hjust = 0.2, size = 10),
+  legend.text = element_text(size = 10)) +
+  scale_color_manual(name=NULL, values = c('blue','red')) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(pltLP, pltHP, ncol = 2)
+```
+
+#### Testing the model
+The 25% of data is fed to the model for predictions and the difference between actual values are compared.
+```{r echo=FALSE}
+# Pass test data to the model to get the predictions
+predictions <- predict(nn_model, test_data);
+
+# Get the real values using scaled parameters
+high_test_preds <- predictions[, 1] * scale_parameters$`scaled:scale`[1] +
+                    scale_parameters$`scaled:center`[1]
+
+low_test_preds <- predictions[, 2] * scale_parameters$`scaled:scale`[2] +
+                   scale_parameters$`scaled:center`[2]
+
+high_test_actuals <- test_data[, 1] * scale_parameters$`scaled:scale`[1] +
+                scale_parameters$`scaled:center`[1]
+
+low_test_actuals <- test_data[, 2] * scale_parameters$`scaled:scale`[2] +
+               scale_parameters$`scaled:center`[2]
+
+ema_actuals <- test_data[, 15] * scale_parameters$`scaled:scale`[15] +
+               scale_parameters$`scaled:center`[15]
+
+sma_actuals <- test_data[, 17] * scale_parameters$`scaled:scale`[17] +
+               scale_parameters$`scaled:center`[17]
+
+sma_hi_actuals <- test_data[, 18] * scale_parameters$`scaled:scale`[18] +
+  scale_parameters$`scaled:center`[18]
+
+test_day=seq(1:nrow(test_data))
+
+# Combine the results to a dataframe
+test_output <- data.frame(cbind(high_test_preds, high_test_actuals,
+                            low_test_preds, low_test_actuals, 
+                            ema_actuals, test_day, sma_actuals, sma_hi_actuals))
+
+highprice_testerrors = high_test_preds - high_test_actuals
+lowprice_testerrors = low_test_preds - low_test_actuals
+nice_output_test = cbind(train_output, highprice_testerrors,lowprice_testerrors)
+head(nice_output_test,3)
+```
+The model is performing not too well for testing data with higher RMSE values on high price and low price as compared to training data. 
+```{r echo=FALSE}
+cat('High predictions error: \n', rmse(test_output[,2], test_output[,1]))
+cat('\nLow predictions error: \n', rmse(test_output[,4], test_output[,3]))
+```
+
+#### Testing performance plot
+
+It is clearly visible that the prediction lines follow the actual line which shows the accuracy of the model. The predicted values are showing significant deviation from the actual values in the testing data especially around day 75 - day 130. The actual values were considerably higher than the predicted values here.
+However for the significant deviations suggest that the model could be improved by training it on a more representative data. Both the graph shows the volatility of the actual prices.
+
+```{r echo=FALSE, fig.height=7, fig.width=14}
+pltLPP <- ggplot() + geom_line(data=test_output, aes(x=test_output[,6], y=test_output[,4] , colour='Actual Price')) +
+  geom_line(data=test_output, aes(x=test_output[,6], y=test_output[,5], colour='10-Day EMA')) +
+  geom_line(data=test_output, aes(x=test_output[,6], y=test_output[,3], colour='Low Price Pred')) +
+  labs(x='Day', y='Share Price ($)') +
+  ggtitle('Low Price Prediction: Testing') + 
+  theme(legend.position = c(0.8,1), legend.justification = c(0, 1),
+  legend.title = element_text(hjust = 0.2, size = 10),
+  legend.text = element_text(size = 10)) +
+  scale_color_manual(name=NULL, values = c('blue','green', 'red')) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+pltHPP <- ggplot() + geom_line(data=test_output, aes(x=test_output[,6], y=test_output[,2] , colour='Actual Price')) +
+  geom_line(data=test_output, aes(x=test_output[,6], y=test_output[,1], colour='High Price Pred')) +
+  labs(x='Day', y='Share Price ($)') +
+  ggtitle('High Price Prediction: Testing') + 
+  theme(legend.position = c(0.8,1), legend.justification = c(0, 1),
+  legend.title = element_text(hjust = 0.2, size = 10),
+  legend.text = element_text(size = 10)) +
+  scale_color_manual(name=NULL, values = c('green','red')) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(pltLPP, pltHPP, ncol = 2)
+```
+
+## Trading Strategy
+Here we are building a trading rule which allows to make decisions on the 3 possible actions - Buy, Sell or Hold. The rules are applied on training data. The variance will be set to 1% indicating the the prediction price will deviate only within 1% from the actual price during buying and selling. This is to ensure the predictions are not deviating much from the real market value. If the prediction is below the 10 day EMA, it is indicating a downward trend and is a buy signal. 
+While buying, capital should not be 0, which means there should be money for the buying. If buying decision is made on the last day of training, there will not be any opportunity to further trading. The rule also makes sure that a buy can happen only after a sell.
+While selling, we should be having the stock in the portfolio to sell with capital 0. 
+If its the last day of trading, then selling decision must be made without checking for other conditions. All the available stocks are sold at the closing price of that day.
+
+A notional amount of $10,000 is set as investment. The earnings is calculated if the trading strategy was invoked on the training data. 
+
+```{r echo=FALSE, results='hide'}
+# Set a capital amount
+capital = 10000
+num_stocks = 0
+buying_price = 0
+var = 0.01
+upper = 1 + var
+lower = 1 - var
+expMove <- (na.omit(tail(EMA10,-split*length(EMA10))))
+buys = 0
+sells = 0
+decisions <- c()
+
+for(i in 1:nrow(train_output)){
+  
+  predictHigh = train_output[i, 1]
+  actualHigh = train_output[i, 2]
+  predictLow = train_output[i, 3]
+  actualLow = train_output[i, 4]
+  ema = train_output[i, 5]
+  
+  entry_price = upper * predictLow
+  exit_price = lower * predictHigh
+  
+ if (actualLow >= lower * predictLow && actualLow < upper * predictLow &&
+    entry_price < ema && capital != 0 && i < nrow(train_output)) {
+    num_stocks <- capital / entry_price
+    buying_price <- entry_price
+    capital = 0
+    buys <- buys + 1
+    decisions[i] <- 1
+    cat('Day:', i, 'Buy' ,num_stocks, 'shares at: $', entry_price, '\n')
+  }
+  
+  else if (actualHigh >= lower * predictHigh && actualHigh < upper * predictHigh &&
+    capital == 0 && exit_price > buying_price){
+    capital = num_stocks * exit_price
+    num_stocks = 0 
+    sells <- sells + 1
+    decisions[i] <- -1
+    cat('Day:', i, 'Sold at: $', exit_price, ' Balance: $', capital, '\n')
+  }
+  
+  else {
+    decisions[i] <- 0
+    cat('Day:',i,'Hold\n')}
+
+  if(i==nrow(train_output)){
+    if(capital==0){
+      capital = num_stocks * closing_price[503,1]
+      num_stocks = 0
+      sells <- sells + 1
+      decisions[i] <- 0
+      cat('Day:', i, 'Sold at: $', exit_price, ' Balance: $', capital, '\n')
+    }
+    profit = capital - 10000
+    trades = buys + sells
+    cat('$',profit, 'profit after ',trades, 'trades: ', buys, 'buys and', sells, 'sells.\n')
+  }
+}
+```
+### Buy/Sell decisions plot
+When the trading strategy is applied, a profit of $ 194091 profit is made after  114 trades:  57 buys and 57 sells. The buy/sell decisions are plotted as Trading activity.
+```{r echo=FALSE, fig.height=7, fig.width=14, fig.align='center'}  
+decisions_df <- data.frame(decisions)
+decisions_made <- data.frame(cbind(decisions_df, train_output[,6]))
+colnames(decisions_made) <- c('Decision', 'Day')
+
+ggplot() + geom_line(data=decisions_made, aes(x=decisions_made[,2], y=decisions_made[,1]), col='blue')+
+  labs(x='Day', y='Decision') +
+  ggtitle('Trading Activity') + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks=c(-1.0,0,1.0), labels=c('Sell', 'Hold', 'Buy'))
+```
+
+## Comparison Performance - Mean value
+
+In order to further analyse the performance of our trading strategy, this is compared with another approach. Here we are comparing with the performance of the mean value. This is also invoked in the training data as done earlier. The trading strategy is compared against the performance of the mean value. The mean values of low and high prices for the past 7 days is used here instead of the predicted values done in neural network.
+```{r echo=FALSE, results='hide'}  
+# Comparison - Mean
+
+capital = 10000
+num_stocks = 0
+buying_price = 0
+var = 0.01
+upper = 1 + var
+lower = 1 - var
+buys = 0
+sells = 0
+comp_decisions <- c()
+
+for(i in 1:nrow(train_output)){
+  
+  actualHigh = train_output[i, 2]
+  actualLow = train_output[i, 4]
+  sma_lo = train_output[i, 7]
+  sma_hi = train_output[i, 8]
+  
+  entry_price = upper * sma_lo
+  exit_price = lower * sma_hi
+  
+  if(actualLow >= lower * sma_lo && actualLow < upper * sma_lo &&
+    capital != 0 && i < nrow(train_output)){
+    num_stocks <- capital / entry_price
+    buying_price <- entry_price
+    capital = 0
+    buys <- buys + 1
+    comp_decisions[i] <- 1
+    cat('Day:', i, 'Buy' ,num_stocks, 'shares at: $', entry_price, '\n')
+  }
+  
+  else if (actualHigh >= lower * sma_hi && actualHigh < upper * sma_hi &&
+    capital == 0 && exit_price > buying_price){
+    capital = num_stocks * exit_price
+    num_stocks = 0 
+    sells <- sells + 1
+    comp_decisions[i] <- -1
+    cat('Day:', i, 'Sold at: $', exit_price, ' Balance: $', capital, '\n')
+  }
+  
+  else {
+    comp_decisions[i] <- 0
+    cat('Day:',i,'Hold\n')}
+  
+  if(i==nrow(train_output)){
+    if(capital==0){
+      capital = num_stocks * closing_price[503,1]
+      num_stocks = 0
+      sells <- sells + 1
+      comp_decisions[i] <- -1
+      cat('Day:', i, 'Sold at: $', exit_price, ' Balance: $', capital, '\n')
+    }
+    profit = capital - 10000
+    trades = buys + sells
+    cat('$',profit, 'profit after ',trades, 'trades: ', buys, 'buys and', sells, 'sells.\n')
+  }
+}
+```
+The same trading strategy is applied here and a profit of $61931 is made after 72 trades with 36 buys and 36 sells. Even though this is good profit and a positive value, it is not as high as the profit earned using neural network. 
+
+#### SMA Comparison - Plot
+
+The actual line for both the graph high price and low price is consistently above the SMA line, which captures the trend of the stock prices and indicates a bullish signal .
+
+```{r echo=FALSE, fig.height=7, fig.width=14} 
+
+# Plotting comparison method
+plt1 <- ggplot() + geom_line(data=train_output, aes(x=train_output[,6], y=train_output[,4] , colour='Low Price')) +
+  geom_line(data=train_output, aes(x=train_output[,6], y=train_output[,7], colour='SMA Low Prediction')) +
+  labs(x='Day', y='Share Price ($)') +
+  ggtitle('Low Price SMA Prediction Performance') + 
+  theme(legend.position = "right", legend.justification = "bottom",    
+  axis.title.x = element_text(size = 15), # Adjust size of x-axis label
+  axis.title.y = element_text(size = 15), # Adjust size of y-axis label
+  axis.text.x = element_text(angle = 45, hjust = 1), # Rotate x-axis labels
+  plot.title = element_text(hjust = 0.5, size = 18),# Adjust size of plot title 
+  legend.title = element_text(hjust = 0.2, size = 10),
+  legend.text = element_text(size = 10)) +
+  scale_color_manual(name=NULL, values = c('blue', 'red')) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+plt2 <- ggplot() + geom_line(data=train_output, aes(x=train_output[,6], y=train_output[,2] , colour='High Price')) +
+  geom_line(data=train_output, aes(x=train_output[,6], y=train_output[,8], colour='SMA High Prediction')) +
+  labs(x='Day', y='Share Price ($)') +
+  ggtitle('High Price SMA Prediction Performance') + 
+  theme(legend.position = "right", legend.justification = "bottom",
+  axis.title.x = element_text(size = 15), # Adjust size of x-axis label
+  axis.title.y = element_text(size = 15), # Adjust size of y-axis label
+  axis.text.x = element_text(angle = 45, hjust = 1), # Rotate x-axis labels
+  plot.title = element_text(hjust = 0.5, size = 18), # Adjust size of plot title 
+  legend.title = element_text(hjust = 0.2, size = 10),
+  legend.text = element_text(size = 10)) +
+  scale_color_manual(name=NULL, values = c('blue', 'red')) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(plt1, plt2, ncol = 2)
+```
+
+```{r echo=FALSE, fig.height=7, fig.width=14}
+d <- data.frame(comp_decisions)
+comp_decisions_made <- data.frame(cbind(d, train_output[,6]))
+colnames(decisions_made) <- c('Decison', 'Day')
+
+ggplot() + geom_line(data=comp_decisions_made, aes(x=comp_decisions_made[,2], y=comp_decisions_made[,1]), col='green')+
+  labs(x='Day', y='Decision') +
+  ggtitle('SMA-Method Trading Activity') + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_blank()) +
+  scale_y_continuous(breaks=c(-1.0,0,1.0), labels=c('Sell', 'Hold', 'Buy'))
+```
+
+## Conclusion
+
+This script evaluates the performance by comparing predicted prices with actual prices and making decisions. The neural network model has some degree of accuracy. It is performing well for training data with low RMSE values whereas it is opposite for the testing data. There are some significant deviations in the testing data, which is expected since no model can predict stock prices with complete accuracy. The model's performance can be improved by incorporating additional data. Whereas for the mean value the profit is not as good as the profit earned using neural network model which can be due to differences in market conditions during the periods. The trading strategy is simple which aims to buy low and sell high and the printed output provides insights. The model provides a framework for testing trading strategies and evaluated against market conditions.
+
+## References
+https://www.linkedin.com/pulse/exciting-news-algorithmic-trading-revolutionizing-0a3of/
+
+https://www.optionstocksmachines.com/post/2021-02-22-neural-nets/nothing-but-net/
+
+https://www.sciencedirect.com/science/article/pii/S1877050917318252
+
+https://www.sciencedirect.com/science/article/pii/S0304405X9800052X
+
+Journal of Financial Economics 51 (1999) by Franklin Allen,Risto Karjalainen
+
+https://www.logikfx.com/post/exponential-moving-average-101-how-to-use-ema-in-technical-analysis
+
+https://www.ig.com/uk/trading-strategies/10-trading-indicators-every-trader-should-know-190604
+
+Article:Trading with Exponential Moving Averages (EMA): A Comprehensive Guide, CoinW Exchange
+
+
+
